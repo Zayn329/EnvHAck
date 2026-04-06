@@ -1,3 +1,4 @@
+import uvicorn
 from fastapi import FastAPI
 from server.env import StratifiedEpidemicEnv, EpidemicAction
 
@@ -32,3 +33,10 @@ def step_env(action: EpidemicAction):
 def get_state():
     """OpenEnv Spec: State endpoint"""
     return env.state()
+
+def main():
+    """Mandatory entry point for the OpenEnv validator."""
+    uvicorn.run("server.app:app", host="0.0.0.0", port=7860)
+
+if __name__ == "__main__":
+    main()
