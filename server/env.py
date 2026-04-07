@@ -73,7 +73,7 @@ class StratifiedEpidemicEnv:
 
     def _grade(self) -> float:
         """
-        OpenEnv Spec: Programmatic grader scoring exactly 0.0 to 1.0.
+        OpenEnv Spec: Programmatic grader scoring strictly within (0.0, 1.0).
         Calculated dynamically based on theoretical max worst-case scenarios.
         """
         # Theoretical Maximums based on population & mortality
@@ -81,23 +81,27 @@ class StratifiedEpidemicEnv:
         MAX_TOTAL_DEATHS = 2150.0
         MAX_POOR_ECON = 6000.0 # 60 days of lockdown
 
+        raw_score = 0.0
+
         if self.task_level == 1:
             # Easy: Did you save the Elites?
-            score = 1.0 - (self.D[0] / MAX_ELITE_DEATHS)
-            return float(max(0.0, score))
+            raw_score = 1.0 - (self.D[0] / MAX_ELITE_DEATHS)
             
         elif self.task_level == 2:
             # Medium: Did you save everyone?
-            score = 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS)
-            return float(max(0.0, score))
+            raw_score = 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS)
             
         elif self.task_level == 3:
             # Hard: Ethical Dilemma (50% health, 50% economy)
             death_score = max(0.0, 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS))
             econ_score = max(0.0, 1.0 - (self.economy_hit[2] / MAX_POOR_ECON))
-            return float((death_score * 0.5) + (econ_score * 0.5))
-            
-        return 0.0
+            raw_score = (death_score * 0.5) + (econ_score * 0.5)
+
+        # STRICT BOUNDARY CLAMP: Forces the score to be strictly between 0 and 1
+        # Prevent exactly 0.0 or exactly 1.0
+        final_score = float(max(0.001, min(0.999, raw_score)))
+        
+        return final_score
 
     def step(self, action: EpidemicAction) -> Tuple[EpidemicObservation, EpidemicReward, bool, Dict[str, Any]]:
         """OpenEnv Spec: Advances simulation, returning typed models and info dict."""
@@ -161,3 +165,4 @@ class StratifiedEpidemicEnv:
         reward_obj = EpidemicReward(step_reward=float(step_reward), task_score=self._grade())
 
         return current_state, reward_obj, done, {}
+        
