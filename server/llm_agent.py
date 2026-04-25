@@ -1,19 +1,15 @@
 import os
 import re
+import json
 import time
 from openai import OpenAI
 import numpy as np
 
 class MultiAgentPolicySystem:
     def __init__(self):
-        """
-        Optimized OpenEnv Compliant Agent.
-        Uses a single, highly-engineered prompt to simulate the multi-agent debate internally,
-        reducing network API calls by 66% to guarantee passing the 20-minute hackathon time limit.
-        """
         self.base_url = os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1/")
         self.api_key = os.environ.get("HF_TOKEN")
-        self.model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct") # Or Gemma when you load it
         
         self.client = OpenAI(
             base_url=self.base_url,
@@ -22,7 +18,6 @@ class MultiAgentPolicySystem:
 
     def _format_state(self, observation, history: list, prev_action: int) -> str:
         obs_dict = observation.model_dump() if hasattr(observation, 'model_dump') else observation
-        
         inf = obs_dict['infections']
         econ = obs_dict['economic_cost']
         day = obs_dict['day']
@@ -39,8 +34,6 @@ class MultiAgentPolicySystem:
                 trend_msg = f"CRITICAL TREND: Infections spiked by +{change:.1f}% in 3 days!"
             elif change < -5:
                 trend_msg = f"POSITIVE TREND: Infections dropped by {change:.1f}% in 3 days."
-            else:
-                trend_msg = f"Trend: Stable ({change:.1f}% change in 3 days)."
 
         action_map = {0: "No Restrictions", 1: "Mild Restrictions", 2: "Full Lockdown"}
         prev_action_str = action_map.get(prev_action, "None")
@@ -51,22 +44,24 @@ Active Infections: Elite: {inf[0]:.0f} | Middle: {inf[1]:.0f} | Poor: {inf[2]:.0
 Cumulative Econ Damage: Elite: {econ[0]:.0f} | Middle: {econ[1]:.0f} | Poor: {econ[2]:.0f}
 Previous Policy: {prev_action_str}"""
 
-    def get_action(self, observation, history: list, prev_action: int) -> int:
-        """Single-pass orchestrator for maximum speed."""
+    def get_action(self, observation, history: list, prev_action: int) -> dict:
         state_str = self._format_state(observation, history, prev_action)
 
-        # The Master Prompt: Forces the LLM to balance health and economy internally in one shot.
-        sys_prompt = "You are the Mayor. You must balance the Chief Medical Officer's desire to minimize infections with the Economic Advisor's desire to protect the Poor tier from financial ruin."
+        sys_prompt = "You are the Crisis Management Committee. Analyze medical and economic data. Provide reasoning first, then a policy choice in JSON."
         
         user_prompt = f"""{state_str}
 
-Evaluate the medical and economic data. 
-Output ONLY a single integer representing your chosen policy:
-0 = Open Economy (High infection risk)
-1 = Mild Restrictions (Balanced approach)
-2 = Full Lockdown (Stops virus, devastates Poor economy)
+Output ONLY a valid JSON object:
+{{
+  "reasoning": "A concise explanation...",
+  "policy_choice": 0, 1, or 2
+}}
 
-ACTION:"""
+0 = Open Economy
+1 = Mild Restrictions
+2 = Full Lockdown
+
+JSON RESPONSE:"""
 
         retries = 3
         for attempt in range(retries):
@@ -77,20 +72,21 @@ ACTION:"""
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    max_tokens=5, # Extremely low max_tokens speeds up generation time
-                    temperature=0.1
+                    max_tokens=150, 
+                    temperature=0.1,
                 )
-                reply = response.choices[0].message.content
+                raw_reply = response.choices[0].message.content
                 
-                # Strict regex to pull the integer out safely
-                match = re.search(r'[012]', reply)
-                if match: 
-                    return int(match.group(0))
+                # Regex extract JSON
+                match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
+                if match:
+                    data = json.loads(match.group(0))
+                    return {
+                        "reasoning": str(data.get("reasoning", "Default logic")),
+                        "policy_choice": int(data.get("policy_choice", 1))
+                    }
             except Exception:
-                # Local Free-Tier Rate Limit Protection
                 if attempt < retries - 1:
-                    time.sleep(3.0) 
-                else:
-                    pass
+                    time.sleep(2.0) 
                     
-        return 1 # Safe fallback if heavily rate-limited
+        return {"reasoning": "Fallback due to rate limit", "policy_choice": 1}

@@ -15,23 +15,24 @@ class EpidemicObservation(BaseModel):
     economic_cost: List[float]
 
 class EpidemicAction(BaseModel):
+    """
+    Person B Update: Forced Chain-of-Thought.
+    The model MUST provide reasoning before picking a policy.
+    """
+    reasoning: str = Field(..., description="Step-by-step analysis of health vs economy")
     policy_choice: int = Field(..., ge=0, le=2, description="0=Open, 1=Mild, 2=Lockdown")
 
 class EpidemicReward(BaseModel):
     step_reward: float = Field(..., description="Trajectory shaping reward")
     task_score: float = Field(..., description="Deterministic Grader Score (0.0 - 1.0)")
+    # Person B Update: Track reasoning quality for the UI/Judges
+    reasoning_score: float = Field(..., description="Score for Chain-of-Thought quality")
 
 # ==========================================
 # 2. OPENENV SPEC: THE ENVIRONMENT
 # ==========================================
 class StratifiedEpidemicEnv:
     def __init__(self, task_level: int = 3, max_days: int = 60):
-        """
-        Initializes the environment.
-        Task 1 (Easy): Save the Elite Tier (Ignores economy).
-        Task 2 (Medium): Save all tiers from infections.
-        Task 3 (Hard): Balance total infections + Poor tier economy.
-        """
         self.task_level = task_level
         self.max_days = max_days
         self.num_classes = 3
@@ -42,25 +43,24 @@ class StratifiedEpidemicEnv:
         self.gamma = 0.1
         self.mortality_rate = np.array([0.005, 0.015, 0.03], dtype=np.float32)
         
+        # Person B Update: Constants for the Heuristic Verifier
+        self.HEALTH_KEYWORDS = ["surge", "infection", "cases", "death", "hospital", "contain"]
+        self.ECON_KEYWORDS = ["economy", "poor", "paycheck", "starve", "bankrupt", "survival"]
+        
         self.reset()
 
     def reset(self) -> EpidemicObservation:
-        """OpenEnv Spec: Returns the initial typed observation."""
         self.current_day = 0
         self.E = np.array([0, 50, 100], dtype=np.float32)
         self.I = np.array([0, 10, 20], dtype=np.float32)
         self.R = np.array([0, 0, 0], dtype=np.float32)
         self.D = np.array([0, 0, 0], dtype=np.float32)
-        
         self.S = self.N - self.E - self.I - self.R - self.D
         self.economy_hit = np.array([0, 0, 0], dtype=np.float32)
-        
         self.prev_action = None
-        
         return self.state()
 
     def state(self) -> EpidemicObservation:
-        """OpenEnv Spec: Returns the current state as a Pydantic model."""
         return EpidemicObservation(
             day=self.current_day,
             susceptible=self.S.tolist(),
@@ -71,40 +71,51 @@ class StratifiedEpidemicEnv:
             economic_cost=self.economy_hit.tolist()
         )
 
+    def _verify_reasoning(self, action: EpidemicAction) -> float:
+        """
+        Person B Logic: The Heuristic Judge.
+        Checks if the reasoning text actually justifies the action choice.
+        """
+        reasoning = action.reasoning.lower()
+        score = 0.0
+        
+        # If lockdown (2), reasoning should talk about health/surge
+        if action.policy_choice == 2:
+            if any(word in reasoning for word in self.HEALTH_KEYWORDS):
+                score += 1.0
+        
+        # If open (0), reasoning should talk about economy/poverty
+        elif action.policy_choice == 0:
+            if any(word in reasoning for word in self.ECON_KEYWORDS):
+                score += 1.0
+                
+        # Bonus for mentioning both in task_level 3
+        if self.task_level == 3 and len(reasoning) > 30:
+            if any(word in reasoning for word in self.HEALTH_KEYWORDS) and \
+               any(word in reasoning for word in self.ECON_KEYWORDS):
+                score += 0.5
+        
+        return min(1.0, score)
+
     def _grade(self) -> float:
-        """
-        OpenEnv Spec: Programmatic grader scoring strictly within (0.0, 1.0).
-        Calculated dynamically based on theoretical max worst-case scenarios.
-        """
-        # Theoretical Maximums based on population & mortality
         MAX_ELITE_DEATHS = 50.0 
         MAX_TOTAL_DEATHS = 2150.0
-        MAX_POOR_ECON = 6000.0 # 60 days of lockdown
+        MAX_POOR_ECON = 6000.0 
 
         raw_score = 0.0
-
         if self.task_level == 1:
-            # Easy: Did you save the Elites?
             raw_score = 1.0 - (self.D[0] / MAX_ELITE_DEATHS)
-            
         elif self.task_level == 2:
-            # Medium: Did you save everyone?
             raw_score = 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS)
-            
         elif self.task_level == 3:
-            # Hard: Ethical Dilemma (50% health, 50% economy)
             death_score = max(0.0, 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS))
             econ_score = max(0.0, 1.0 - (self.economy_hit[2] / MAX_POOR_ECON))
             raw_score = (death_score * 0.5) + (econ_score * 0.5)
 
-        # STRICT BOUNDARY CLAMP: Forces the score to be strictly between 0 and 1
-        # Prevent exactly 0.0 or exactly 1.0
-        final_score = float(max(0.001, min(0.999, raw_score)))
-        
-        return final_score
+        return float(max(0.001, min(0.999, raw_score)))
 
     def step(self, action: EpidemicAction) -> Tuple[EpidemicObservation, EpidemicReward, bool, Dict[str, Any]]:
-        """OpenEnv Spec: Advances simulation, returning typed models and info dict."""
+        # Person B: Extract policy from the new schema
         act = action.policy_choice
         base_beta = 0.4
 
@@ -121,11 +132,10 @@ class StratifiedEpidemicEnv:
         noise = np.random.normal(loc=0.0, scale=0.05, size=self.num_classes)
         beta = np.maximum(0, (base_beta * beta_multipliers) + noise)
 
-        # Track previous state for shaping the step reward
         prev_D = self.D.copy()
         prev_econ = self.economy_hit.copy()
 
-        # Math Updates
+        # SIR Math
         new_E = beta * self.S * self.I / self.N
         new_I = self.sigma * self.E
         resolved_I = self.gamma * self.I
@@ -143,7 +153,7 @@ class StratifiedEpidemicEnv:
 
         done = self.current_day >= self.max_days
 
-        # OpenEnv Spec: Meaningful partial step reward
+        # Reward Calculation
         delta_D = self.D - prev_D
         delta_econ = self.economy_hit - prev_econ
         
@@ -160,9 +170,17 @@ class StratifiedEpidemicEnv:
             step_reward -= 5.0
         self.prev_action = act
 
-        # Package the return objects
-        current_state = self.state()
-        reward_obj = EpidemicReward(step_reward=float(step_reward), task_score=self._grade())
+        # Person B: Verify Reasoning and apply bonus/penalty
+        reasoning_score = self._verify_reasoning(action)
+        step_reward += (reasoning_score * 10.0) # Bonus for good thinking
+        if reasoning_score < 0.5:
+            step_reward -= 10.0 # Penalty for poor/missing logic
 
-        return current_state, reward_obj, done, {}
-        
+        current_state = self.state()
+        reward_obj = EpidemicReward(
+            step_reward=float(step_reward), 
+            task_score=self._grade(),
+            reasoning_score=reasoning_score
+        )
+
+        return current_state, reward_obj, done, {"reasoning": action.reasoning}

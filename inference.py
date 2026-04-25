@@ -27,21 +27,28 @@ def run_evaluation():
         step_num = 1
         
         while not done:
-            action_int = agent.get_action(obs, history, prev_action)
-            action = EpidemicAction(policy_choice=action_int)
+            # Get the dictionary containing both reasoning and choice
+            action_dict = agent.get_action(obs, history, prev_action)
+            
+            # Pass both fields into the Pydantic model
+            action = EpidemicAction(
+                reasoning=action_dict["reasoning"], 
+                policy_choice=action_dict["policy_choice"]
+            )
             
             next_obs, reward_obj, done, info = env.step(action)
             
             step_reward = reward_obj.step_reward
             all_rewards.append(step_reward)
             
-            # [STEP] format: reward to 2 decimals, done is lowercase
+            # Use the dictionary's integer for the print statement
+            action_str = f"policy_{action_dict['policy_choice']}"
             done_str = str(done).lower()
-            print(f"[STEP] step={step_num} action=policy_{action_int} reward={step_reward:.2f} done={done_str} error=null", flush=True)
+            print(f"[STEP] step={step_num} action={action_str} reward={step_reward:.2f} done={done_str} error=null", flush=True)
             
-            history.append({'day': obs.day, 'action': action_int, 'obs': next_obs})
+            history.append({'day': obs.day, 'action': action_dict['policy_choice'], 'obs': next_obs})
             obs = next_obs
-            prev_action = action_int
+            prev_action = action_dict['policy_choice']
             step_num += 1
             
         # [END] format: success lowercase, score to 3 decimals
