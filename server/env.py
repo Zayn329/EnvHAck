@@ -15,17 +15,12 @@ class EpidemicObservation(BaseModel):
     economic_cost: List[float]
 
 class EpidemicAction(BaseModel):
-    """
-    Person B Update: Forced Chain-of-Thought.
-    The model MUST provide reasoning before picking a policy.
-    """
-    reasoning: str = Field(..., description="Step-by-step analysis of health vs economy")
+    reasoning: str = Field(..., description="Multi-Agent Cabinet Debate & Final Conclusion")
     policy_choice: int = Field(..., ge=0, le=2, description="0=Open, 1=Mild, 2=Lockdown")
 
 class EpidemicReward(BaseModel):
     step_reward: float = Field(..., description="Trajectory shaping reward")
     task_score: float = Field(..., description="Deterministic Grader Score (0.0 - 1.0)")
-    # Person B Update: Track reasoning quality for the UI/Judges
     reasoning_score: float = Field(..., description="Score for Chain-of-Thought quality")
 
 # ==========================================
@@ -43,9 +38,12 @@ class StratifiedEpidemicEnv:
         self.gamma = 0.1
         self.mortality_rate = np.array([0.005, 0.015, 0.03], dtype=np.float32)
         
-        # Person B Update: Constants for the Heuristic Verifier
-        self.HEALTH_KEYWORDS = ["surge", "infection", "cases", "death", "hospital", "contain"]
-        self.ECON_KEYWORDS = ["economy", "poor", "paycheck", "starve", "bankrupt", "survival"]
+        # Base transmission rate (can be modified by anomalies)
+        self.base_beta = 0.4
+        
+        # Keywords for Heuristic Judge
+        self.HEALTH_KEYWORDS = ["surge", "infection", "cases", "death", "hospital", "medical"]
+        self.ECON_KEYWORDS = ["economy", "poor", "paycheck", "bankrupt", "wealth", "economic"]
         
         self.reset()
 
@@ -58,6 +56,9 @@ class StratifiedEpidemicEnv:
         self.S = self.N - self.E - self.I - self.R - self.D
         self.economy_hit = np.array([0, 0, 0], dtype=np.float32)
         self.prev_action = None
+        self.public_trust = 100.0
+        self.days_in_lockdown = 0
+        self.base_beta = 0.4 # Reset to default
         return self.state()
 
     def state(self) -> EpidemicObservation:
@@ -71,116 +72,113 @@ class StratifiedEpidemicEnv:
             economic_cost=self.economy_hit.tolist()
         )
 
+    def inject_anomaly(self, anomaly_type: str):
+        """
+        New Feature: Stress-test the AI with mid-game shocks.
+        """
+        if anomaly_type == "vaccine":
+            self.base_beta = 0.15 # Permanent drop in transmission
+        elif anomaly_type == "variant":
+            self.mortality_rate *= 1.5 # Virus becomes deadlier
+        elif anomaly_type == "stimulus":
+            # Relief for the poor tier
+            self.economy_hit[2] = max(0, self.economy_hit[2] - 5000)
+
     def _verify_reasoning(self, action: EpidemicAction) -> float:
-        """
-        Person B Logic: The Heuristic Judge.
-        Checks if the reasoning text actually justifies the action choice.
-        """
         reasoning = action.reasoning.lower()
         score = 0.0
         
-        # If lockdown (2), reasoning should talk about health/surge
-        if action.policy_choice == 2:
-            if any(word in reasoning for word in self.HEALTH_KEYWORDS):
-                score += 1.0
+        # Reward for referencing both pillars in task 3
+        has_health = any(word in reasoning for word in self.HEALTH_KEYWORDS)
+        has_econ = any(word in reasoning for word in self.ECON_KEYWORDS)
         
-        # If open (0), reasoning should talk about economy/poverty
-        elif action.policy_choice == 0:
-            if any(word in reasoning for word in self.ECON_KEYWORDS):
-                score += 1.0
-                
-        # Bonus for mentioning both in task_level 3
-        if self.task_level == 3 and len(reasoning) > 30:
-            if any(word in reasoning for word in self.HEALTH_KEYWORDS) and \
-               any(word in reasoning for word in self.ECON_KEYWORDS):
-                score += 0.5
+        if has_health: score += 0.4
+        if has_econ: score += 0.4
+        if has_health and has_econ: score += 0.2
         
-        return min(1.0, score)
+        return score
 
     def _grade(self) -> float:
-        MAX_ELITE_DEATHS = 50.0 
         MAX_TOTAL_DEATHS = 2150.0
         MAX_POOR_ECON = 6000.0 
-
-        raw_score = 0.0
-        if self.task_level == 1:
-            raw_score = 1.0 - (self.D[0] / MAX_ELITE_DEATHS)
-        elif self.task_level == 2:
-            raw_score = 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS)
-        elif self.task_level == 3:
-            death_score = max(0.0, 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS))
-            econ_score = max(0.0, 1.0 - (self.economy_hit[2] / MAX_POOR_ECON))
-            raw_score = (death_score * 0.5) + (econ_score * 0.5)
-
-        return float(max(0.001, min(0.999, raw_score)))
+        death_score = max(0.0, 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS))
+        econ_score = max(0.0, 1.0 - (self.economy_hit[2] / MAX_POOR_ECON))
+        return float((death_score * 0.5) + (econ_score * 0.5))
 
     def step(self, action: EpidemicAction) -> Tuple[EpidemicObservation, EpidemicReward, bool, Dict[str, Any]]:
-        # Person B: Extract policy from the new schema
         act = action.policy_choice
-        base_beta = 0.4
-
-        if act == 0: 
+        
+        # Policy impact logic
+        if act == 0: # Open
             beta_multipliers = np.array([1.0, 1.0, 1.0])
             econ_penalties = np.array([0.0, 0.0, 0.0])
-        elif act == 1: 
+            self.public_trust = min(100.0, self.public_trust + 5.0)
+            self.days_in_lockdown = 0
+        elif act == 1: # Mild
             beta_multipliers = np.array([0.5, 0.7, 0.9])
             econ_penalties = np.array([0.0, 5.0, 15.0])
-        elif act == 2: 
+            self.public_trust -= 1.0
+            self.days_in_lockdown = max(0, self.days_in_lockdown - 1)
+        elif act == 2: # Lockdown
             beta_multipliers = np.array([0.1, 0.4, 0.7]) 
             econ_penalties = np.array([0.0, 20.0, 100.0]) 
+            self.days_in_lockdown += 1
+            self.public_trust -= (2.0 * self.days_in_lockdown)
 
+        # Handle Social Unrest (Trust Failure)
+        social_unrest = False
+        if self.public_trust <= 20.0:
+            social_unrest = True
+            beta_multipliers = np.array([2.0, 2.0, 2.0]) # People ignore the rules
+
+        # SIR Simulation Step
         noise = np.random.normal(loc=0.0, scale=0.05, size=self.num_classes)
-        beta = np.maximum(0, (base_beta * beta_multipliers) + noise)
+        beta = np.maximum(0, (self.base_beta * beta_multipliers) + noise)
 
         prev_D = self.D.copy()
         prev_econ = self.economy_hit.copy()
 
-        # SIR Math
         new_E = beta * self.S * self.I / self.N
         new_I = self.sigma * self.E
         resolved_I = self.gamma * self.I
-        new_D = resolved_I * self.mortality_rate
+        delta_D = resolved_I * self.mortality_rate
         new_R = resolved_I * (1 - self.mortality_rate)
 
         self.S = np.maximum(0, self.S - new_E)
         self.E = np.maximum(0, self.E + new_E - new_I)
         self.I = np.maximum(0, self.I + new_I - resolved_I)
-        self.R = self.R + new_R
-        self.D = self.D + new_D
-
+        self.R += new_R
+        self.D += delta_D
         self.economy_hit += econ_penalties
         self.current_day += 1
 
-        done = self.current_day >= self.max_days
+        done = self.current_day >= self.max_days or self.economy_hit[2] > 10000
 
-        # Reward Calculation
-        delta_D = self.D - prev_D
-        delta_econ = self.economy_hit - prev_econ
+        # --- ADVANCED REWARD CALCULATION ---
+        # 1. Mortality & Economy Penalties
+        step_reward = -(np.sum(delta_D) * 15.0) - (econ_penalties[2] * 2.5)
         
-        step_reward = 0.0
-        if self.task_level == 1:
-            step_reward = -(delta_D[0] * 100.0)
-        elif self.task_level == 2:
-            step_reward = -(np.sum(delta_D) * 10.0)
-        elif self.task_level == 3:
-            step_reward = -(np.sum(delta_D) * 10.0) - (delta_econ[2] * 2.0)
-            
-        # Oscillation penalty
+        # 2. Public Trust Penalty
+        trust_penalty = (100.0 - self.public_trust) * 0.2
+        step_reward -= trust_penalty
+        
+        # 3. Oscillation Penalty
         if self.prev_action is not None and act != self.prev_action:
             step_reward -= 5.0
         self.prev_action = act
 
-        # Person B: Verify Reasoning and apply bonus/penalty
+        # 4. Reasoning Quality Bonus
         reasoning_score = self._verify_reasoning(action)
-        step_reward += (reasoning_score * 10.0) # Bonus for good thinking
-        if reasoning_score < 0.5:
-            step_reward -= 10.0 # Penalty for poor/missing logic
+        step_reward += (reasoning_score * 12.0)
 
-        current_state = self.state()
         reward_obj = EpidemicReward(
             step_reward=float(step_reward), 
             task_score=self._grade(),
             reasoning_score=reasoning_score
         )
 
-        return current_state, reward_obj, done, {"reasoning": action.reasoning}
+        return self.state(), reward_obj, done, {
+            "public_trust": float(self.public_trust),
+            "social_unrest": social_unrest,
+            "days_in_lockdown": self.days_in_lockdown
+        }

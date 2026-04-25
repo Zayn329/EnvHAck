@@ -53,18 +53,13 @@ Summarize their arguments, then make your final policy decision."""
         
         user_prompt = f"""{state_str}
 
-Output ONLY a valid JSON object matching this exact structure:
+Output ONLY a valid JSON object. Do NOT use newlines inside the values.
 {{
-  "medical_officer_advice": "1 sentence argument...",
-  "economic_advisor_advice": "1 sentence argument...",
-  "mayor_reasoning": "Your final 1 sentence conclusion...",
+  "medical_officer_advice": "1 short sentence...",
+  "economic_advisor_advice": "1 short sentence...",
+  "mayor_reasoning": "1 short sentence...",
   "policy_choice": 0, 1, or 2
 }}
-
-0 = Open Economy
-1 = Mild Restrictions
-2 = Full Lockdown
-
 JSON RESPONSE:"""
 
         retries = 3
