@@ -45,9 +45,11 @@ Previous Policy: {prev_action_str}"""
         state_str = self._format_state(observation, history, prev_action)
 
         sys_prompt = """You are the Mayor of a city in crisis, equipped with a Multi-Agent reasoning framework.
-Before acting, you must simulate a debate between your two top advisors:
+Before acting, simulate a debate between your two top advisors:
 1. Chief Medical Officer (Focuses strictly on minimizing infections).
 2. Chief Economic Advisor (Focuses strictly on preventing the poor from bankruptcy).
+
+CRITICAL RULE: Public Trust is your most valuable resource. If Public Trust drops below 40%, you MUST prioritize the Economic Advisor's plan to open the economy, or you will face social unrest.
 
 Summarize their arguments, then make your final policy decision."""
         
@@ -100,3 +102,35 @@ JSON RESPONSE:"""
                     time.sleep(2.0) 
                     
         return {"reasoning": "Fallback due to rate limit/error", "policy_choice": 1}
+    def interpret_anomaly(self, text_description: str) -> dict:
+        """Translates human words into environment math using the LLM."""
+        prompt = f"""Analyze this public event: "{text_description}"
+Identify if this affects: 
+1. 'beta' (Transmission speed - e.g., variants, superspreaders)
+2. 'mortality' (Death rate - e.g., deadly mutations, hospital failure)
+3. 'economy' (Wealth - e.g., stimulus checks, market crash, riots)
+
+Output ONLY valid JSON matching this structure: 
+{{
+  "target": "beta"|"mortality"|"economy", 
+  "multiplier": 1.5
+}}
+Rule: Use multiplier < 1.0 for positive/helpful events, and > 1.0 for negative/disastrous events."""
+        
+        try:
+            # We use your existing Hugging Face InferenceClient
+            response = self.client.chat_completion(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=100, 
+                temperature=0.1
+            )
+            raw = response.choices[0].message.content
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                return json.loads(match.group(0).replace("'", '"'))
+        except Exception as e:
+            print(f"⚠️ Anomaly Parsing Error: {e}")
+        
+        # Safe fallback so the app never crashes during the demo
+        return {"target": "beta", "multiplier": 1.0}
