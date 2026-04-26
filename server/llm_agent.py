@@ -2,16 +2,23 @@ import os
 import re
 import json
 import time
-import requests
+from openai import OpenAI
 
 class MultiAgentPolicySystem:
     def __init__(self):
-        self.model_id = "zain329/EpidemicAI-Gemma2B-GRPO"
-        self.api_url = f"https://api-inference.huggingface.co/models/{self.model_id}"
+        # Qwen 2.5 72B Instruct is fully supported on the HF Serverless API
+        self.model_id = "Qwen/Qwen2.5-72B-Instruct"
         
         # Securely pull the token from Hugging Face Space Secrets!
-        self.hf_token = os.environ.get("HF_TOKEN", "")
-        self.headers = {"Authorization": f"Bearer {self.hf_token}"}
+        self.hf_token = os.environ.get("HF_TOKEN")
+        if not self.hf_token:
+            print("WARNING: HF_TOKEN environment variable not set.")
+            
+        # Use the official OpenAI SDK for the Chat Completions endpoint
+        self.client = OpenAI(
+            base_url=f"https://api-inference.huggingface.co/models/{self.model_id}/v1/",
+            api_key=self.hf_token or "dummy_token"
+        )
         print(f"Connected to HF Serverless API for {self.model_id}")
 
     def _format_state(self, observation, history: list, prev_action: int) -> str:
@@ -39,46 +46,52 @@ Cabinet Members:
 
 {state_str}
 
-Output JSON: {{"medical_advice": "...", "econ_advice": "...", "policy_choice": 0, 1, or 2}}\nJSON RESPONSE:"""
-        
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 200, "temperature": 0.3, "return_full_text": False}
-        }
+Output JSON: {{"medical_advice": "...", "econ_advice": "...", "policy_choice": 0, 1, or 2}}"""
         
         # --- SMART RETRY LOOP FOR COLD STARTS ---
         raw_reply = None
         for attempt in range(5):
             try:
-                response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=60)
-                
-                # Handle HF "Model is Loading" Cold Start
-                if response.status_code == 503:
-                    est_time = response.json().get('estimated_time', 20)
-                    print(f"⏳ Model is waking up. Waiting {est_time:.0f} seconds...")
-                    time.sleep(min(est_time, 20)) # Wait and try again
-                    continue
-                    
-                response.raise_for_status()
-                raw_reply = response.json()[0]['generated_text']
+                response = self.client.chat.completions.create(
+                    model=self.model_id,
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that outputs JSON only."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=200,
+                    temperature=0.3
+                )
+                raw_reply = response.choices[0].message.content
                 break # Success! Break the loop.
                 
             except Exception as e:
                 print(f"API Error (Attempt {attempt+1}): {e}")
-                time.sleep(2)
+                time.sleep(5) # Wait 5 seconds for cold starts
         
         # If API totally failed after all retries
         if not raw_reply:
             return {"reasoning": "Cabinet Offline (API timeout). Enacting emergency mild restrictions.", "policy_choice": 1}
 
         # --- ROBUST PARSING ---
-        match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
+        cleaned_reply = raw_reply.strip()
+        if cleaned_reply.startswith("```json"): cleaned_reply = cleaned_reply[7:]
+        elif cleaned_reply.startswith("```"): cleaned_reply = cleaned_reply[3:]
+        if cleaned_reply.endswith("```"): cleaned_reply = cleaned_reply[:-3]
+
+        match = re.search(r'\{.*\}', cleaned_reply, re.DOTALL)
         if match:
+            json_str = match.group(0)
             try:
-                data = json.loads(match.group(0).replace("'", '"'))
+                data = json.loads(json_str)
                 reasoning = f"CMO: {data.get('medical_advice', 'Health first')} | ECON: {data.get('econ_advice', 'Protect jobs')}"
                 return {"reasoning": reasoning, "policy_choice": int(data.get("policy_choice", 1))}
-            except: pass
+            except Exception:
+                try:
+                    import ast
+                    data = ast.literal_eval(json_str)
+                    reasoning = f"CMO: {data.get('medical_advice', 'Health first')} | ECON: {data.get('econ_advice', 'Protect jobs')}"
+                    return {"reasoning": reasoning, "policy_choice": int(data.get("policy_choice", 1))}
+                except: pass
             
         # Recovery logic
         if "lockdown" in raw_reply.lower(): choice = 2
@@ -89,26 +102,41 @@ Output JSON: {{"medical_advice": "...", "econ_advice": "...", "policy_choice": 0
 
     def interpret_anomaly(self, text_description: str) -> dict:
         fallback = {"target": "beta", "multiplier": 1.0}
-        api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct"
         prompt = f"You are an Epidemic Simulator Engine. Read the following real-world event: '{text_description}'. Output a JSON dict containing exactly two keys: 'target' (either 'beta' for transmission or 'economy' for financial damage) and 'multiplier' (a float like 0.5 for a vaccine, or 2.0 for a super-spreader event)."
         
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 100, "temperature": 0.1, "return_full_text": False}
-        }
-        
         try:
-            response = requests.post(api_url, headers=self.headers, json=payload, timeout=10)
-            response.raise_for_status()
-            raw_reply = response.json()[0]['generated_text']
+            response = self.client.chat.completions.create(
+                model=self.model_id,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that outputs JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=100,
+                temperature=0.1
+            )
+            raw_reply = response.choices[0].message.content
             
             # Robust parsing
-            match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
+            cleaned_reply = raw_reply.strip()
+            if cleaned_reply.startswith("```json"): cleaned_reply = cleaned_reply[7:]
+            elif cleaned_reply.startswith("```"): cleaned_reply = cleaned_reply[3:]
+            if cleaned_reply.endswith("```"): cleaned_reply = cleaned_reply[:-3]
+            
+            match = re.search(r'\{.*\}', cleaned_reply, re.DOTALL)
             if match:
-                data = json.loads(match.group(0).replace("'", '"'))
-                if 'target' in data and 'multiplier' in data:
-                    return {"target": str(data['target']), "multiplier": float(data['multiplier'])}
+                json_str = match.group(0)
+                try:
+                    data = json.loads(json_str)
+                    if 'target' in data and 'multiplier' in data:
+                        return {"target": str(data['target']), "multiplier": float(data['multiplier'])}
+                except Exception:
+                    try:
+                        import ast
+                        data = ast.literal_eval(json_str)
+                        if 'target' in data and 'multiplier' in data:
+                            return {"target": str(data['target']), "multiplier": float(data['multiplier'])}
+                    except: pass
         except Exception as e:
-            print(f"⚠️ NLP Interpretation Error: {e}")
+            print(f"NLP Interpretation Error: {e}")
             
         return fallback

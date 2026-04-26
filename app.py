@@ -14,15 +14,14 @@ st.set_page_config(page_title="EpidemicAI Command Center", page_icon="🌍", lay
 # --- 2. SESSION STATE INITIALIZATION ---
 if "env" not in st.session_state:
     st.session_state.env = StratifiedEpidemicEnv()
-if "agent" not in st.session_state:
-    st.session_state.agent = MultiAgentPolicySystem()
 if "history" not in st.session_state:
     st.session_state.history = []
 if "scenario_text" not in st.session_state:
     st.session_state.scenario_text = ""
 
 env = st.session_state.env
-agent = st.session_state.agent
+# Always recreate the agent so hot-reloads work instantly (no state is stored in the agent anyway)
+agent = MultiAgentPolicySystem()
 history = st.session_state.history
 
 # --- 3. THE SIDEBAR (CONTROLS & GOD MODE) ---
@@ -136,6 +135,12 @@ if len(history) > 0:
     fig_econ.update_traces(line_color='orange')
     fig_econ.add_hline(y=3000, line_dash="dash", line_color="red", annotation_text="Bankruptcy")
     c2.plotly_chart(fig_econ, use_container_width=True)
+
+    # --- 6.5. SPATIAL GRAPH UPGRADE ---
+    st.subheader("🌐 City Spread Topology")
+    st.caption("Real-time node transmission. Red = Infected, Blue = Susceptible, Black = Deaths.")
+    fig_spatial = env.get_graph_figure()
+    st.plotly_chart(fig_spatial, use_container_width=True)
 
     # --- 7. THE AI CABINET DEBATE ---
     st.subheader("🧠 Live AI Cabinet Debate")
