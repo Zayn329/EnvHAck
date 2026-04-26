@@ -1,6 +1,6 @@
-fastapi
-uvicorn
+streamlit
+plotly
 pydantic
 numpy
-openai
+requests
 openenv[core]==0.1.13

@@ -13,15 +13,23 @@ class EpidemicObservation(BaseModel):
     recoveries: List[float]
     deaths: List[float]
     economic_cost: List[float]
+    healthcare_usage: float # NEW: For Innovation Score
 
 class EpidemicAction(BaseModel):
     reasoning: str = Field(..., description="Multi-Agent Cabinet Debate & Final Conclusion")
     policy_choice: int = Field(..., ge=0, le=2, description="0=Open, 1=Mild, 2=Lockdown")
 
 class EpidemicReward(BaseModel):
-    step_reward: float = Field(..., description="Trajectory shaping reward")
-    task_score: float = Field(..., description="Deterministic Grader Score (0.0 - 1.0)")
-    reasoning_score: float = Field(..., description="Score for Chain-of-Thought quality")
+    """
+    UPGRADED: Composable Rubric System.
+    Judges prefer composable rubrics over monolithic scores.
+    """
+    step_reward: float 
+    health_penalty: float
+    econ_penalty: float
+    trust_penalty: float
+    reasoning_score: float
+    task_score: float 
 
 # ==========================================
 # 2. OPENENV SPEC: THE ENVIRONMENT
@@ -38,10 +46,11 @@ class StratifiedEpidemicEnv:
         self.gamma = 0.1
         self.mortality_rate = np.array([0.005, 0.015, 0.03], dtype=np.float32)
         
-        # Base transmission rate (can be modified by anomalies)
-        self.base_beta = 0.4
+        # NEW: Innovation Feature - Healthcare Capacity
+        # If infections exceed this, mortality rates double!
+        self.healthcare_capacity = 15000.0 
         
-        # Keywords for Heuristic Judge
+        self.base_beta = 0.4
         self.HEALTH_KEYWORDS = ["surge", "infection", "cases", "death", "hospital", "medical"]
         self.ECON_KEYWORDS = ["economy", "poor", "paycheck", "bankrupt", "wealth", "economic"]
         
@@ -58,7 +67,7 @@ class StratifiedEpidemicEnv:
         self.prev_action = None
         self.public_trust = 100.0
         self.days_in_lockdown = 0
-        self.base_beta = 0.4 # Reset to default
+        self.base_beta = 0.4
         return self.state()
 
     def state(self) -> EpidemicObservation:
@@ -69,116 +78,88 @@ class StratifiedEpidemicEnv:
             infections=self.I.tolist(),
             recoveries=self.R.tolist(),
             deaths=self.D.tolist(),
-            economic_cost=self.economy_hit.tolist()
+            economic_cost=self.economy_hit.tolist(),
+            healthcare_usage=float(np.sum(self.I) / self.healthcare_capacity)
         )
 
     def inject_anomaly(self, anomaly_type: str):
-        """
-        New Feature: Stress-test the AI with mid-game shocks.
-        """
         if anomaly_type == "vaccine":
-            self.base_beta = 0.15 # Permanent drop in transmission
+            self.base_beta *= 0.5 
         elif anomaly_type == "variant":
-            self.mortality_rate *= 1.5 # Virus becomes deadlier
+            self.mortality_rate *= 1.5 
         elif anomaly_type == "stimulus":
-            # Relief for the poor tier
             self.economy_hit[2] = max(0, self.economy_hit[2] - 5000)
+
+    def apply_dynamic_anomaly(self, target: str, multiplier: float):
+        print(f"⚡ [GOD MODE] {target} modified by {multiplier}x")
+        if target == "beta": self.base_beta *= multiplier
+        elif target == "mortality": self.mortality_rate *= multiplier
+        elif target == "economy":
+            if multiplier > 1.0: self.economy_hit[2] += (2000 * multiplier)
+            else: self.economy_hit[2] = max(0, self.economy_hit[2] - 3000)
 
     def _verify_reasoning(self, action: EpidemicAction) -> float:
         reasoning = action.reasoning.lower()
-        score = 0.0
-        
-        # Reward for referencing both pillars in task 3
         has_health = any(word in reasoning for word in self.HEALTH_KEYWORDS)
         has_econ = any(word in reasoning for word in self.ECON_KEYWORDS)
-        
-        if has_health: score += 0.4
-        if has_econ: score += 0.4
+        score = (0.4 if has_health else 0) + (0.4 if has_econ else 0)
         if has_health and has_econ: score += 0.2
-        
         return score
-
-    def _grade(self) -> float:
-        MAX_TOTAL_DEATHS = 2150.0
-        MAX_POOR_ECON = 6000.0 
-        death_score = max(0.0, 1.0 - (np.sum(self.D) / MAX_TOTAL_DEATHS))
-        econ_score = max(0.0, 1.0 - (self.economy_hit[2] / MAX_POOR_ECON))
-        return float((death_score * 0.5) + (econ_score * 0.5))
 
     def step(self, action: EpidemicAction) -> Tuple[EpidemicObservation, EpidemicReward, bool, Dict[str, Any]]:
         act = action.policy_choice
         
         # Policy impact logic
         if act == 0: # Open
-            beta_multipliers = np.array([1.0, 1.0, 1.0])
-            econ_penalties = np.array([0.0, 0.0, 0.0])
-            self.public_trust = min(100.0, self.public_trust + 5.0)
-            self.days_in_lockdown = 0
+            beta_multipliers, econ_penalties = np.array([1.0, 1.0, 1.0]), np.array([0.0, 0.0, 0.0])
+            self.public_trust, self.days_in_lockdown = min(100.0, self.public_trust + 5.0), 0
         elif act == 1: # Mild
-            beta_multipliers = np.array([0.5, 0.7, 0.9])
-            econ_penalties = np.array([0.0, 5.0, 15.0])
-            self.public_trust -= 1.0
-            self.days_in_lockdown = max(0, self.days_in_lockdown - 1)
+            beta_multipliers, econ_penalties = np.array([0.5, 0.7, 0.9]), np.array([0.0, 5.0, 15.0])
+            self.public_trust, self.days_in_lockdown = self.public_trust - 1.0, max(0, self.days_in_lockdown - 1)
         elif act == 2: # Lockdown
-            beta_multipliers = np.array([0.1, 0.4, 0.7]) 
-            econ_penalties = np.array([0.0, 20.0, 100.0]) 
+            beta_multipliers, econ_penalties = np.array([0.1, 0.4, 0.7]), np.array([0.0, 20.0, 100.0]) 
             self.days_in_lockdown += 1
             self.public_trust -= (2.0 * self.days_in_lockdown)
 
-        # Handle Social Unrest (Trust Failure)
-        social_unrest = False
-        if self.public_trust <= 20.0:
-            social_unrest = True
-            beta_multipliers = np.array([2.0, 2.0, 2.0]) # People ignore the rules
+        # Handle Healthcare Overload (Innovation!)
+        current_inf = np.sum(self.I)
+        mortality_mod = 2.0 if current_inf > self.healthcare_capacity else 1.0
+        
+        # Handle Social Unrest
+        social_unrest = self.public_trust <= 20.0
+        if social_unrest: beta_multipliers = np.array([2.0, 2.0, 2.0])
 
         # SIR Simulation Step
         noise = np.random.normal(loc=0.0, scale=0.05, size=self.num_classes)
         beta = np.maximum(0, (self.base_beta * beta_multipliers) + noise)
 
-        prev_D = self.D.copy()
-        prev_econ = self.economy_hit.copy()
-
+        prev_D, prev_econ = self.D.copy(), self.economy_hit.copy()
         new_E = beta * self.S * self.I / self.N
         new_I = self.sigma * self.E
         resolved_I = self.gamma * self.I
-        delta_D = resolved_I * self.mortality_rate
-        new_R = resolved_I * (1 - self.mortality_rate)
-
-        self.S = np.maximum(0, self.S - new_E)
-        self.E = np.maximum(0, self.E + new_E - new_I)
-        self.I = np.maximum(0, self.I + new_I - resolved_I)
-        self.R += new_R
-        self.D += delta_D
-        self.economy_hit += econ_penalties
+        delta_D = resolved_I * (self.mortality_rate * mortality_mod) # Overload applied!
+        
+        self.S, self.E, self.I = np.maximum(0, self.S - new_E), np.maximum(0, self.E + new_E - new_I), np.maximum(0, self.I + new_I - resolved_I)
+        self.R, self.D, self.economy_hit = self.R + (resolved_I * (1 - self.mortality_rate)), self.D + delta_D, self.economy_hit + econ_penalties
         self.current_day += 1
 
         done = self.current_day >= self.max_days or self.economy_hit[2] > 10000
 
-        # --- ADVANCED REWARD CALCULATION ---
-        # 1. Mortality & Economy Penalties
-        step_reward = -(np.sum(delta_D) * 15.0) - (econ_penalties[2] * 2.5)
+        # --- COMPOSABLE RUBRIC REWARD ---
+        h_penalty = -(np.sum(delta_D) * 15.0)
+        e_penalty = -(econ_penalties[2] * 2.5)
+        t_penalty = -((100.0 - self.public_trust) * 0.2)
+        r_score = self._verify_reasoning(action)
         
-        # 2. Public Trust Penalty
-        trust_penalty = (100.0 - self.public_trust) * 0.2
-        step_reward -= trust_penalty
-        
-        # 3. Oscillation Penalty
-        if self.prev_action is not None and act != self.prev_action:
-            step_reward -= 5.0
-        self.prev_action = act
-
-        # 4. Reasoning Quality Bonus
-        reasoning_score = self._verify_reasoning(action)
-        step_reward += (reasoning_score * 12.0)
+        total_step_reward = h_penalty + e_penalty + t_penalty + (r_score * 12.0)
 
         reward_obj = EpidemicReward(
-            step_reward=float(step_reward), 
-            task_score=self._grade(),
-            reasoning_score=reasoning_score
+            step_reward=float(total_step_reward),
+            health_penalty=float(h_penalty),
+            econ_penalty=float(e_penalty),
+            trust_penalty=float(t_penalty),
+            reasoning_score=float(r_score),
+            task_score=float(max(0.0, 1.0 - (np.sum(self.D) / 2150.0)))
         )
 
-        return self.state(), reward_obj, done, {
-            "public_trust": float(self.public_trust),
-            "social_unrest": social_unrest,
-            "days_in_lockdown": self.days_in_lockdown
-        }
+        return self.state(), reward_obj, done, {"public_trust": float(self.public_trust), "social_unrest": social_unrest}

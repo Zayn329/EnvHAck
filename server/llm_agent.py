@@ -2,135 +2,95 @@ import os
 import re
 import json
 import time
-from huggingface_hub import InferenceClient  # <-- THE BULLETPROOF FIX
-import numpy as np
+import requests
 
 class MultiAgentPolicySystem:
     def __init__(self):
-        self.api_key = os.environ.get("HF_TOKEN")
-        self.model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+        self.model_id = "zain329/EpidemicAI-Gemma2B-GRPO"
+        self.api_url = f"https://api-inference.huggingface.co/models/{self.model_id}"
         
-        # Using Hugging Face's native client! It handles the URLs automatically.
-        self.client = InferenceClient(api_key=self.api_key)
+        # Securely pull the token from Hugging Face Space Secrets!
+        self.hf_token = os.environ.get("HF_TOKEN", "")
+        self.headers = {"Authorization": f"Bearer {self.hf_token}"}
+        print(f"☁️ Connected to HF Serverless API for {self.model_id}")
 
     def _format_state(self, observation, history: list, prev_action: int) -> str:
         obs_dict = observation.model_dump() if hasattr(observation, 'model_dump') else observation
-        inf = obs_dict['infections']
-        econ = obs_dict['economic_cost']
-        day = obs_dict['day']
+        inf, econ, day = obs_dict['infections'], obs_dict['economic_cost'], obs_dict['day']
         
         trend_msg = "Trend: Data stabilizing."
         if len(history) >= 3:
-            old_obs = history[-3]['obs']
-            old_inf_val = old_obs.infections if hasattr(old_obs, 'infections') else old_obs['infections']
-            old_inf = sum(old_inf_val)
-            new_inf = sum(inf)
-            change = ((new_inf - old_inf) / (old_inf + 1)) * 100
-            
-            if change > 5:
-                trend_msg = f"CRITICAL TREND: Infections spiked by +{change:.1f}% in 3 days!"
-            elif change < -5:
-                trend_msg = f"POSITIVE TREND: Infections dropped by {change:.1f}% in 3 days."
+            past_record = history[-3]
+            old_inf = past_record.get('total_infections', sum(inf))
+            change = ((sum(inf) - old_inf) / (old_inf + 1)) * 100
+            if change > 5: trend_msg = f"CRITICAL TREND: Infections spiked by +{change:.1f}%!"
+            elif change < -5: trend_msg = f"POSITIVE TREND: Infections dropped by {change:.1f}%."
 
-        action_map = {0: "No Restrictions", 1: "Mild Restrictions", 2: "Full Lockdown"}
-        prev_action_str = action_map.get(prev_action, "None")
-
-        return f"""--- CURRENT STATE (Day {day}) ---
-{trend_msg}
-Active Infections: Elite: {inf[0]:.0f} | Middle: {inf[1]:.0f} | Poor: {inf[2]:.0f}
-Cumulative Econ Damage: Elite: {econ[0]:.0f} | Middle: {econ[1]:.0f} | Poor: {econ[2]:.0f}
-Previous Policy: {prev_action_str}"""
+        action_map = {0: "Open", 1: "Mild", 2: "Lockdown"}
+        return f"--- Day {day} ---\n{trend_msg}\nInfections: {int(sum(inf))} | Econ Damage: {int(sum(econ))}\nPrevious Policy: {action_map.get(prev_action, 'None')}"
 
     def get_action(self, observation, history: list, prev_action: int) -> dict:
         state_str = self._format_state(observation, history, prev_action)
 
-        sys_prompt = """You are the Mayor of a city in crisis, equipped with a Multi-Agent reasoning framework.
-Before acting, simulate a debate between your two top advisors:
-1. Chief Medical Officer (Focuses strictly on minimizing infections).
-2. Chief Economic Advisor (Focuses strictly on preventing the poor from bankruptcy).
+        prompt = f"""You are the Mayor's Cabinet. Analyze the data and decide policy.
+Cabinet Members: 
+- CMO (Minimize infections)
+- Economic Advisor (Prevent poor class bankruptcy)
 
-CRITICAL RULE: Public Trust is your most valuable resource. If Public Trust drops below 40%, you MUST prioritize the Economic Advisor's plan to open the economy, or you will face social unrest.
+{state_str}
 
-Summarize their arguments, then make your final policy decision."""
+Output JSON: {{"medical_advice": "...", "econ_advice": "...", "policy_choice": 0, 1, or 2}}\nJSON RESPONSE:"""
         
-        user_prompt = f"""{state_str}
-
-Output ONLY a valid JSON object. Do NOT use newlines inside the values.
-{{
-  "medical_officer_advice": "1 short sentence...",
-  "economic_advisor_advice": "1 short sentence...",
-  "mayor_reasoning": "1 short sentence...",
-  "policy_choice": 0, 1, or 2
-}}
-JSON RESPONSE:"""
-
-        retries = 3
-        for attempt in range(retries):
+        payload = {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 200, "temperature": 0.3, "return_full_text": False}
+        }
+        
+        # --- SMART RETRY LOOP FOR COLD STARTS ---
+        raw_reply = None
+        for attempt in range(5):
             try:
-                # HF Native Chat Completion call
-                response = self.client.chat_completion(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=250, 
-                    temperature=0.2,
-                )
-                raw_reply = response.choices[0].message.content
+                response = requests.post(self.api_url, headers=self.headers, json=payload, timeout=60)
                 
-                # Regex extract JSON
-                match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
-                if match:
-                    clean_text = match.group(0).replace("'", '"')
-                    data = json.loads(clean_text)
+                # Handle HF "Model is Loading" Cold Start
+                if response.status_code == 503:
+                    est_time = response.json().get('estimated_time', 20)
+                    print(f"⏳ Model is waking up. Waiting {est_time:.0f} seconds...")
+                    time.sleep(min(est_time, 20)) # Wait and try again
+                    continue
                     
-                    combined_reasoning = (
-                        f"CMO: {data.get('medical_officer_advice', 'N/A')} | "
-                        f"ECON: {data.get('economic_advisor_advice', 'N/A')} | "
-                        f"MAYOR: {data.get('mayor_reasoning', 'Default logic')}"
-                    )
-                    
-                    return {
-                        "reasoning": combined_reasoning,
-                        "policy_choice": int(data.get("policy_choice", 1))
-                    }
-                    
+                response.raise_for_status()
+                raw_reply = response.json()[0]['generated_text']
+                break # Success! Break the loop.
+                
             except Exception as e:
-                print(f"⚠️ API Error (Attempt {attempt}): {e}") 
-                if attempt < retries - 1:
-                    time.sleep(2.0) 
-                    
-        return {"reasoning": "Fallback due to rate limit/error", "policy_choice": 1}
-    def interpret_anomaly(self, text_description: str) -> dict:
-        """Translates human words into environment math using the LLM."""
-        prompt = f"""Analyze this public event: "{text_description}"
-Identify if this affects: 
-1. 'beta' (Transmission speed - e.g., variants, superspreaders)
-2. 'mortality' (Death rate - e.g., deadly mutations, hospital failure)
-3. 'economy' (Wealth - e.g., stimulus checks, market crash, riots)
+                print(f"⚠️ API Error (Attempt {attempt+1}): {e}")
+                time.sleep(2)
+        
+        # If API totally failed after all retries
+        if not raw_reply:
+            return {"reasoning": "Cabinet Offline (API timeout). Enacting emergency mild restrictions.", "policy_choice": 1}
 
-Output ONLY valid JSON matching this structure: 
-{{
-  "target": "beta"|"mortality"|"economy", 
-  "multiplier": 1.5
-}}
-Rule: Use multiplier < 1.0 for positive/helpful events, and > 1.0 for negative/disastrous events."""
-        
-        try:
-            # We use your existing Hugging Face InferenceClient
-            response = self.client.chat_completion(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=100, 
-                temperature=0.1
-            )
-            raw = response.choices[0].message.content
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if match:
-                return json.loads(match.group(0).replace("'", '"'))
-        except Exception as e:
-            print(f"⚠️ Anomaly Parsing Error: {e}")
-        
-        # Safe fallback so the app never crashes during the demo
+        # --- ROBUST PARSING ---
+        match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0).replace("'", '"'))
+                reasoning = f"CMO: {data.get('medical_advice', 'Health first')} | ECON: {data.get('econ_advice', 'Protect jobs')}"
+                return {"reasoning": reasoning, "policy_choice": int(data.get("policy_choice", 1))}
+            except: pass
+            
+        # Recovery logic
+        if "lockdown" in raw_reply.lower(): choice = 2
+        elif "open" in raw_reply.lower(): choice = 0
+        else: choice = 1
+            
+        return {"reasoning": f"Cabinet Discussion: {raw_reply[:150]}...", "policy_choice": choice}
+
+    def interpret_anomaly(self, text_description: str) -> dict:
+        text = text_description.lower()
+        if any(word in text for word in ["variant", "spike", "mutation"]): return {"target": "beta", "multiplier": 1.5}
+        if any(word in text for word in ["vaccine", "cure", "mask"]): return {"target": "beta", "multiplier": 0.5}
+        if any(word in text for word in ["crash", "bankruptcy", "debt"]): return {"target": "economy", "multiplier": 2.0}
+        if any(word in text for word in ["stimulus", "check", "relief"]): return {"target": "economy", "multiplier": 0.5}
         return {"target": "beta", "multiplier": 1.0}
