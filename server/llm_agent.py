@@ -88,9 +88,27 @@ Output JSON: {{"medical_advice": "...", "econ_advice": "...", "policy_choice": 0
         return {"reasoning": f"Cabinet Discussion: {raw_reply[:150]}...", "policy_choice": choice}
 
     def interpret_anomaly(self, text_description: str) -> dict:
-        text = text_description.lower()
-        if any(word in text for word in ["variant", "spike", "mutation"]): return {"target": "beta", "multiplier": 1.5}
-        if any(word in text for word in ["vaccine", "cure", "mask"]): return {"target": "beta", "multiplier": 0.5}
-        if any(word in text for word in ["crash", "bankruptcy", "debt"]): return {"target": "economy", "multiplier": 2.0}
-        if any(word in text for word in ["stimulus", "check", "relief"]): return {"target": "economy", "multiplier": 0.5}
-        return {"target": "beta", "multiplier": 1.0}
+        fallback = {"target": "beta", "multiplier": 1.0}
+        api_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct"
+        prompt = f"You are an Epidemic Simulator Engine. Read the following real-world event: '{text_description}'. Output a JSON dict containing exactly two keys: 'target' (either 'beta' for transmission or 'economy' for financial damage) and 'multiplier' (a float like 0.5 for a vaccine, or 2.0 for a super-spreader event)."
+        
+        payload = {
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 100, "temperature": 0.1, "return_full_text": False}
+        }
+        
+        try:
+            response = requests.post(api_url, headers=self.headers, json=payload, timeout=10)
+            response.raise_for_status()
+            raw_reply = response.json()[0]['generated_text']
+            
+            # Robust parsing
+            match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0).replace("'", '"'))
+                if 'target' in data and 'multiplier' in data:
+                    return {"target": str(data['target']), "multiplier": float(data['multiplier'])}
+        except Exception as e:
+            print(f"⚠️ NLP Interpretation Error: {e}")
+            
+        return fallback
