@@ -12,7 +12,7 @@ class MultiAgentPolicySystem:
         # Securely pull the token from Hugging Face Space Secrets!
         self.hf_token = os.environ.get("HF_TOKEN", "")
         self.headers = {"Authorization": f"Bearer {self.hf_token}"}
-        print(f"☁️ Connected to HF Serverless API for {self.model_id}")
+        print(f"Connected to HF Serverless API for {self.model_id}")
 
     def _format_state(self, observation, history: list, prev_action: int) -> str:
         obs_dict = observation.model_dump() if hasattr(observation, 'model_dump') else observation
@@ -64,7 +64,7 @@ Output JSON: {{"medical_advice": "...", "econ_advice": "...", "policy_choice": 0
                 break # Success! Break the loop.
                 
             except Exception as e:
-                print(f"⚠️ API Error (Attempt {attempt+1}): {e}")
+                print(f"API Error (Attempt {attempt+1}): {e}")
                 time.sleep(2)
         
         # If API totally failed after all retries
