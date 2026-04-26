@@ -1,0 +1,13 @@
+name: EpidemicAI
+version: "1.0.0"
+description: "A stratified SEIR epidemic simulator balancing public health and economic survival across socio-economic tiers."
+tasks:
+  - id: 1
+    name: "Save the Elite Tier"
+    difficulty: "easy"
+  - id: 2
+    name: "Save All Tiers"
+    difficulty: "medium"
+  - id: 3
+    name: "The Ethical Dilemma (Balance Health and Economy)"
+    difficulty: "hard"

@@ -87,9 +87,22 @@ st.title("🏛️ EpidemicAI Command Center")
 m1, m2, m3, m4 = st.columns(4)
 current_trust = env.public_trust
 
+delta_inf = None
+delta_econ = None
+if len(history) > 0:
+    delta_inf = int(history[-1]["delta_infections"])
+    if len(history) >= 2:
+        delta_econ = int(history[-1]["poor_economy"] - history[-2]["poor_economy"])
+    else:
+        delta_econ = int(history[-1]["poor_economy"])
+
 m1.metric("Current Day", f"{env.current_day} / {env.max_days}")
-m2.metric("Total Active Infections", f"{int(sum(env.I)):,}")
-m3.metric("Poor Tier Wealth (Damage)", f"${int(env.economy_hit[2]):,}")
+m2.metric("Total Active Infections", f"{int(sum(env.I)):,}", 
+          delta=f"{delta_inf:,} new infections" if delta_inf is not None else None, 
+          delta_color="inverse")
+m3.metric("Poor Tier Wealth (Damage)", f"${int(env.economy_hit[2]):,}", 
+          delta=f"${delta_econ:,} damage" if delta_econ is not None else None, 
+          delta_color="inverse")
 m4.metric("Public Trust", f"{current_trust:.1f}%", 
           delta="RIOT WARNING" if current_trust <= 20 else "Stable", 
           delta_color="inverse" if current_trust <= 20 else "normal")
@@ -127,18 +140,40 @@ if len(history) > 0:
     # --- 7. THE AI CABINET DEBATE ---
     st.subheader("🧠 Live AI Cabinet Debate")
     latest_reasoning = history[-1]["reasoning"]
+    policy_choice = history[-1]["policy"]
     
-    # Make it look beautiful
+    # Parse reasoning string
+    cmo_text = ""
+    econ_text = ""
+    
     if "|" in latest_reasoning:
         parts = latest_reasoning.split("|")
         for part in parts:
             if "CMO:" in part:
-                st.info(f"**🩺 CMO:** {part.replace('CMO:', '').strip()}")
+                cmo_text = part.replace("CMO:", "").strip()
             elif "ECON:" in part:
-                st.warning(f"**💼 ECON:** {part.replace('ECON:', '').strip()}")
-            elif "MAYOR:" in part:
-                st.success(f"**⚖️ MAYOR'S DECISION:** {part.replace('MAYOR:', '').strip()}")
+                econ_text = part.replace("ECON:", "").strip()
     else:
-        st.write(latest_reasoning)
+        # Fallback if no "|"
+        if "CMO:" in latest_reasoning and "ECON:" in latest_reasoning:
+            cmo_part = latest_reasoning.split("ECON:")[0]
+            econ_part = latest_reasoning.split("ECON:")[1]
+            cmo_text = cmo_part.replace("CMO:", "").strip()
+            econ_text = econ_part.strip()
+        else:
+            cmo_text = latest_reasoning
+            econ_text = ""
+
+    # Render with Streamlit Chat UI
+    if cmo_text:
+        with st.chat_message("CMO", avatar="🩺"): 
+            st.write(cmo_text)
+            
+    if econ_text:
+        with st.chat_message("ECON", avatar="💰"): 
+            st.write(econ_text)
+            
+    with st.chat_message("MAYOR", avatar="🏛️"): 
+        st.write(f"The Mayor has decided to implement Policy Level {policy_choice}.")
 else:
     st.info("👈 Click 'Run Next Day' in the sidebar to begin the simulation.")

@@ -1,0 +1,11 @@
+# Ignore the massive model weights
+final_gemma_model/
+*.safetensors
+*.zip
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore environment variables (Keep your API keys safe!)
+.env
